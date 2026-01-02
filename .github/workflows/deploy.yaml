@@ -130,19 +130,29 @@ jobs:
         run: |
           echo "Cleaning up old images for repository: ${{ env.REPO_NAME }}"
           
-          # Get the digests of the tags we want to keep
-          KEEP_DIGEST_1=$(az acr repository show --name ${{ env.ACR_NAME }} --image ${{ env.REPO_NAME }}:${{ env.TAG }} --query digest -o tsv || echo "none")
-          KEEP_DIGEST_2=$(az acr repository show --name ${{ env.ACR_NAME }} --image ${{ env.REPO_NAME }}:${{ env.PREV_TAG }} --query digest -o tsv || echo "none")
+          # Define all tags we want to retain across ALL environments
+          RETENTION_TAGS=("production" "production-prev" "staging" "staging-prev")
           
-          echo "Keeping digest for ${{ env.TAG }}: $KEEP_DIGEST_1"
-          echo "Keeping digest for ${{ env.PREV_TAG }}: $KEEP_DIGEST_2"
+          # Build a list of digests to keep
+          KEEP_DIGESTS=""
+          
+          for TAG in "${RETENTION_TAGS[@]}"; do
+            DIGEST=$(az acr repository show --name ${{ env.ACR_NAME }} --image ${{ env.REPO_NAME }}:$TAG --query digest -o tsv 2>/dev/null || echo "")
+            if [ ! -z "$DIGEST" ]; then
+              echo "Found digest for $TAG: $DIGEST"
+              KEEP_DIGESTS="$KEEP_DIGESTS $DIGEST"
+            else
+              echo "No digest found for $TAG (might not exist yet)."
+            fi
+          done
           
           # List all manifests (digests) in the repository
           # Ordered by time is nice for logging, but we process all.
           MANIFESTS=$(az acr repository show-manifests --name ${{ env.ACR_NAME }} --repository ${{ env.REPO_NAME }} --query "[].digest" -o tsv)
           
           for DIGEST in $MANIFESTS; do
-            if [ "$DIGEST" == "$KEEP_DIGEST_1" ] || [ "$DIGEST" == "$KEEP_DIGEST_2" ]; then
+            # Check if current digest is in our KEEP list
+            if [[ "$KEEP_DIGESTS" == *"$DIGEST"* ]]; then
               echo "Skipping (keeping) $DIGEST"
             else
               echo "Deleting $DIGEST..."
