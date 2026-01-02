@@ -12,7 +12,7 @@ permissions:
 env:
   # Common variables (secrets should be set in GitHub)
   ACR_NAME: ${{ secrets.ACR_NAME }}
-  # RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }} -- Removed, set per environment
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
 
 jobs:
   build-and-deploy:
@@ -44,15 +44,21 @@ jobs:
             echo "TAG=staging" >> $GITHUB_ENV
             echo "PREV_TAG=staging-prev" >> $GITHUB_ENV
             echo "APP_NAME=${{ secrets.CONTAINER_APP_NAME_STAGING }}" >> $GITHUB_ENV
-            echo "RESOURCE_GROUP=rg-ninjahire-staging" >> $GITHUB_ENV
+            echo "RESOURCE_GROUP=rg-ninjahire-staging-fake" >> $GITHUB_ENV
             echo "Environment detected: STAGING"
           else
             echo "Unknown branch for deployment"
             exit 1
           fi
 
+      - name: Check ACR Health
+        continue-on-error: true
+        run: |
+          az acr check-health -n ${{ env.ACR_NAME }} --yes --ignore-errors 2>&1 | grep -v "NOTARY_COMMAND_ERROR" || true
+
       - name: Log in to Azure Container Registry
         run: |
+          # Use ACR_NAME for CLI authentication (standard handling)
           az acr login --name ${{ env.ACR_NAME }}
 
       # ---------------------------------------------------------------------
@@ -63,7 +69,7 @@ jobs:
       - name: Retag Current Image as Previous
         continue-on-error: true # It's okay if this fails on the very first run (image doesn't exist)
         run: |
-          echo "Checking if image ${{ env.ACR_NAME }}.azurecr.io/${{ env.REPO_NAME }}:${{ env.TAG }} exists..."
+          echo "Checking if image ${{ env.ACR_LOGIN_SERVER }}/${{ env.REPO_NAME }}:${{ env.TAG }} exists..."
           
           # Check if the tag exists
           EXISTS=$(az acr repository show-tags --name ${{ env.ACR_NAME }} --repository ${{ env.REPO_NAME }} --query "contains([], '${{ env.TAG }}')" -o tsv)
@@ -72,9 +78,10 @@ jobs:
             echo "Image exists. Retagging ${{ env.TAG }} to ${{ env.PREV_TAG }}..."
             # Use 'az acr import' to copy/retag images within the same registry (efficient and server-side)
             # --force allows overwriting the existing -prev tag
+            # Source must be fully qualified with the login server for internal copy
             az acr import \
               --name ${{ env.ACR_NAME }} \
-              --source ${{ env.REPO_NAME }}:${{ env.TAG }} \
+              --source ${{ env.ACR_LOGIN_SERVER }}/${{ env.REPO_NAME }}:${{ env.TAG }} \
               --image ${{ env.REPO_NAME }}:${{ env.PREV_TAG }} \
               --force
           else
@@ -87,8 +94,8 @@ jobs:
       # ---------------------------------------------------------------------
       - name: Build and Push Docker Image
         run: |
-          LOGIN_SERVER="${{ env.ACR_NAME }}.azurecr.io"
-          IMAGE_URI="$LOGIN_SERVER/${{ env.REPO_NAME }}:${{ env.TAG }}"
+          # Determine the image URI using the full login server
+          IMAGE_URI="${{ env.ACR_LOGIN_SERVER }}/${{ env.REPO_NAME }}:${{ env.TAG }}"
           
           echo "Building $IMAGE_URI..."
           docker build -t $IMAGE_URI .
@@ -107,10 +114,12 @@ jobs:
           
           # We explicitly specify the image to ensure ACA pulls the new manifest 
           # even if the tag string is the same (mutable tag strategy).
+          # We use --revision-suffix to force a new revision since the image tag hasn't changed.
           az containerapp update \
             --name ${{ env.APP_NAME }} \
             --resource-group ${{ env.RESOURCE_GROUP }} \
-            --image ${{ env.ACR_NAME }}.azurecr.io/${{ env.REPO_NAME }}:${{ env.TAG }}
+            --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.REPO_NAME }}:${{ env.TAG }} \
+            --revision-suffix v${{ github.run_number }}
 
       # ---------------------------------------------------------------------
       # 4. Cleanup Old Images
