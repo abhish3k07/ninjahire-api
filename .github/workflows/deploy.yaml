@@ -1,0 +1,143 @@
+name: Build and Deploy to Azure Container Apps
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  # Common variables (secrets should be set in GitHub)
+  ACR_NAME: ${{ secrets.ACR_NAME }}
+  # RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }} -- Removed, set per environment
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Determine Environment Variables
+        id: env-setup
+        run: |
+          # Service/Repo name matches the GitHub repo name by default or can be customized
+          # Extract repo name from github.repository (e.g., "user/repo" -> "repo")
+          REPO_NAME=${GITHUB_REPOSITORY#*/}
+          echo "REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
+          
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "TAG=production" >> $GITHUB_ENV
+            echo "PREV_TAG=production-prev" >> $GITHUB_ENV
+            echo "APP_NAME=${{ secrets.CONTAINER_APP_NAME_PROD }}" >> $GITHUB_ENV
+            echo "RESOURCE_GROUP=rg-ninjahire-staging" >> $GITHUB_ENV
+            echo "Environment detected: PRODUCTION"
+          elif [[ "${{ github.ref }}" == "refs/heads/staging" ]]; then
+            echo "TAG=staging" >> $GITHUB_ENV
+            echo "PREV_TAG=staging-prev" >> $GITHUB_ENV
+            echo "APP_NAME=${{ secrets.CONTAINER_APP_NAME_STAGING }}" >> $GITHUB_ENV
+            echo "RESOURCE_GROUP=rg-ninjahire-staging" >> $GITHUB_ENV
+            echo "Environment detected: STAGING"
+          else
+            echo "Unknown branch for deployment"
+            exit 1
+          fi
+
+      - name: Log in to Azure Container Registry
+        run: |
+          az acr login --name ${{ env.ACR_NAME }}
+
+      # ---------------------------------------------------------------------
+      # 1. Retag Current Image
+      #    Before building the new one, we save the current 'production' (or 'staging')
+      #    tag to 'production-prev' (or 'staging-prev').
+      # ---------------------------------------------------------------------
+      - name: Retag Current Image as Previous
+        continue-on-error: true # It's okay if this fails on the very first run (image doesn't exist)
+        run: |
+          echo "Checking if image ${{ env.ACR_NAME }}.azurecr.io/${{ env.REPO_NAME }}:${{ env.TAG }} exists..."
+          
+          # Check if the tag exists
+          EXISTS=$(az acr repository show-tags --name ${{ env.ACR_NAME }} --repository ${{ env.REPO_NAME }} --query "contains([], '${{ env.TAG }}')" -o tsv)
+          
+          if [ "$EXISTS" == "true" ]; then
+            echo "Image exists. Retagging ${{ env.TAG }} to ${{ env.PREV_TAG }}..."
+            # Use 'az acr import' to copy/retag images within the same registry (efficient and server-side)
+            # --force allows overwriting the existing -prev tag
+            az acr import \
+              --name ${{ env.ACR_NAME }} \
+              --source ${{ env.REPO_NAME }}:${{ env.TAG }} \
+              --image ${{ env.REPO_NAME }}:${{ env.PREV_TAG }} \
+              --force
+          else
+            echo "Tag ${{ env.TAG }} does not exist. Skipping retag."
+          fi
+
+      # ---------------------------------------------------------------------
+      # 2. Build and Push New Image
+      #    Build the image from the current commit and push it as 'production' (or 'staging').
+      # ---------------------------------------------------------------------
+      - name: Build and Push Docker Image
+        run: |
+          LOGIN_SERVER="${{ env.ACR_NAME }}.azurecr.io"
+          IMAGE_URI="$LOGIN_SERVER/${{ env.REPO_NAME }}:${{ env.TAG }}"
+          
+          echo "Building $IMAGE_URI..."
+          docker build -t $IMAGE_URI .
+          
+          echo "Pushing $IMAGE_URI..."
+          docker push $IMAGE_URI
+
+      # ---------------------------------------------------------------------
+      # 3. Deploy to Azure Container Apps
+      #    Updates the container app to use the newly pushed image.
+      #    This triggers a new revision.
+      # ---------------------------------------------------------------------
+      - name: Deploy to Azure Container Apps
+        run: |
+          echo "Deploying to Container App: ${{ env.APP_NAME }}..."
+          
+          # We explicitly specify the image to ensure ACA pulls the new manifest 
+          # even if the tag string is the same (mutable tag strategy).
+          az containerapp update \
+            --name ${{ env.APP_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --image ${{ env.ACR_NAME }}.azurecr.io/${{ env.REPO_NAME }}:${{ env.TAG }}
+
+      # ---------------------------------------------------------------------
+      # 4. Cleanup Old Images
+      #    Delete any image manifest in this repository that is NOT tagged 
+      #    as 'production' or 'production-prev'.
+      # ---------------------------------------------------------------------
+      - name: Cleanup Old Images
+        run: |
+          echo "Cleaning up old images for repository: ${{ env.REPO_NAME }}"
+          
+          # Get the digests of the tags we want to keep
+          KEEP_DIGEST_1=$(az acr repository show --name ${{ env.ACR_NAME }} --image ${{ env.REPO_NAME }}:${{ env.TAG }} --query digest -o tsv || echo "none")
+          KEEP_DIGEST_2=$(az acr repository show --name ${{ env.ACR_NAME }} --image ${{ env.REPO_NAME }}:${{ env.PREV_TAG }} --query digest -o tsv || echo "none")
+          
+          echo "Keeping digest for ${{ env.TAG }}: $KEEP_DIGEST_1"
+          echo "Keeping digest for ${{ env.PREV_TAG }}: $KEEP_DIGEST_2"
+          
+          # List all manifests (digests) in the repository
+          # Ordered by time is nice for logging, but we process all.
+          MANIFESTS=$(az acr repository show-manifests --name ${{ env.ACR_NAME }} --repository ${{ env.REPO_NAME }} --query "[].digest" -o tsv)
+          
+          for DIGEST in $MANIFESTS; do
+            if [ "$DIGEST" == "$KEEP_DIGEST_1" ] || [ "$DIGEST" == "$KEEP_DIGEST_2" ]; then
+              echo "Skipping (keeping) $DIGEST"
+            else
+              echo "Deleting $DIGEST..."
+              # --yes to bypass confirmation prompt
+              az acr repository delete --name ${{ env.ACR_NAME }} --image ${{ env.REPO_NAME }}@$DIGEST --yes
+            fi
+          done
