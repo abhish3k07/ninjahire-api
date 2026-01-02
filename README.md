@@ -1,4 +1,4 @@
-# Ninjahire API
+# Ninjahire API 
 
 Sample FastAPI service called **Ninjahire API**, packaged for local development and Docker use.
 
