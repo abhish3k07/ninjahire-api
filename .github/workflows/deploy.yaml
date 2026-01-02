@@ -44,7 +44,7 @@ jobs:
             echo "TAG=staging" >> $GITHUB_ENV
             echo "PREV_TAG=staging-prev" >> $GITHUB_ENV
             echo "APP_NAME=${{ secrets.CONTAINER_APP_NAME_STAGING }}" >> $GITHUB_ENV
-            echo "RESOURCE_GROUP=rg-ninjahire-staging-fake" >> $GITHUB_ENV
+            echo "RESOURCE_GROUP=rg-ninjahire-staging" >> $GITHUB_ENV
             echo "Environment detected: STAGING"
           else
             echo "Unknown branch for deployment"
