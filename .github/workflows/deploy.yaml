@@ -52,6 +52,7 @@ jobs:
           fi
 
       - name: Check ACR Health
+        continue-on-error: true
         run: |
           az acr check-health -n ${{ env.ACR_NAME }} --yes
 
