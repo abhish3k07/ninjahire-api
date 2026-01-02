@@ -52,9 +52,8 @@ jobs:
           fi
 
       - name: Check ACR Health
-        continue-on-error: true
         run: |
-          az acr check-health -n ${{ env.ACR_NAME }} --yes
+          az acr check-health -n ${{ env.ACR_NAME }} --yes --ignore-errors NOTARY_COMMAND_ERROR
 
       - name: Log in to Azure Container Registry
         run: |
