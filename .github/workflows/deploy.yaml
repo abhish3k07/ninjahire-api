@@ -51,6 +51,10 @@ jobs:
             exit 1
           fi
 
+      - name: Check ACR Health
+        run: |
+          az acr check-health -n ${{ env.ACR_NAME }} --yes
+
       - name: Log in to Azure Container Registry
         run: |
           # Use ACR_NAME for CLI authentication (standard handling)
