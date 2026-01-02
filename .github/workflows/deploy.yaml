@@ -78,9 +78,10 @@ jobs:
             echo "Image exists. Retagging ${{ env.TAG }} to ${{ env.PREV_TAG }}..."
             # Use 'az acr import' to copy/retag images within the same registry (efficient and server-side)
             # --force allows overwriting the existing -prev tag
+            # Source must be fully qualified with the login server for internal copy
             az acr import \
               --name ${{ env.ACR_NAME }} \
-              --source ${{ env.REPO_NAME }}:${{ env.TAG }} \
+              --source ${{ env.ACR_LOGIN_SERVER }}/${{ env.REPO_NAME }}:${{ env.TAG }} \
               --image ${{ env.REPO_NAME }}:${{ env.PREV_TAG }} \
               --force
           else
@@ -113,10 +114,12 @@ jobs:
           
           # We explicitly specify the image to ensure ACA pulls the new manifest 
           # even if the tag string is the same (mutable tag strategy).
+          # We use --revision-suffix to force a new revision since the image tag hasn't changed.
           az containerapp update \
             --name ${{ env.APP_NAME }} \
             --resource-group ${{ env.RESOURCE_GROUP }} \
-            --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.REPO_NAME }}:${{ env.TAG }}
+            --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.REPO_NAME }}:${{ env.TAG }} \
+            --revision-suffix v${{ github.run_number }}
 
       # ---------------------------------------------------------------------
       # 4. Cleanup Old Images
