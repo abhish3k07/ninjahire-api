@@ -11,8 +11,7 @@ permissions:
 
 env:
   # Common variables (secrets should be set in GitHub)
-  ACR_NAME: ${{ secrets.ACR_NAME }}
-  # RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }} -- Removed, set per environment
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
 
 jobs:
   build-and-deploy:
@@ -44,7 +43,7 @@ jobs:
             echo "TAG=staging" >> $GITHUB_ENV
             echo "PREV_TAG=staging-prev" >> $GITHUB_ENV
             echo "APP_NAME=${{ secrets.CONTAINER_APP_NAME_STAGING }}" >> $GITHUB_ENV
-            echo "RESOURCE_GROUP=rg-ninjahire-staging" >> $GITHUB_ENV
+            echo "RESOURCE_GROUP=rg-ninjahire-staging-fake" >> $GITHUB_ENV
             echo "Environment detected: STAGING"
           else
             echo "Unknown branch for deployment"
@@ -53,7 +52,7 @@ jobs:
 
       - name: Log in to Azure Container Registry
         run: |
-          az acr login --name ${{ env.ACR_NAME }}
+          az acr login --name ${{ env.ACR_LOGIN_SERVER }}
 
       # ---------------------------------------------------------------------
       # 1. Retag Current Image
@@ -63,17 +62,17 @@ jobs:
       - name: Retag Current Image as Previous
         continue-on-error: true # It's okay if this fails on the very first run (image doesn't exist)
         run: |
-          echo "Checking if image ${{ env.ACR_NAME }}.azurecr.io/${{ env.REPO_NAME }}:${{ env.TAG }} exists..."
+          echo "Checking if image ${{ env.ACR_LOGIN_SERVER }}/${{ env.REPO_NAME }}:${{ env.TAG }} exists..."
           
           # Check if the tag exists
-          EXISTS=$(az acr repository show-tags --name ${{ env.ACR_NAME }} --repository ${{ env.REPO_NAME }} --query "contains([], '${{ env.TAG }}')" -o tsv)
+          EXISTS=$(az acr repository show-tags --name ${{ env.ACR_LOGIN_SERVER }} --repository ${{ env.REPO_NAME }} --query "contains([], '${{ env.TAG }}')" -o tsv)
           
           if [ "$EXISTS" == "true" ]; then
             echo "Image exists. Retagging ${{ env.TAG }} to ${{ env.PREV_TAG }}..."
             # Use 'az acr import' to copy/retag images within the same registry (efficient and server-side)
             # --force allows overwriting the existing -prev tag
             az acr import \
-              --name ${{ env.ACR_NAME }} \
+              --name ${{ env.ACR_LOGIN_SERVER }} \
               --source ${{ env.REPO_NAME }}:${{ env.TAG }} \
               --image ${{ env.REPO_NAME }}:${{ env.PREV_TAG }} \
               --force
@@ -87,8 +86,7 @@ jobs:
       # ---------------------------------------------------------------------
       - name: Build and Push Docker Image
         run: |
-          LOGIN_SERVER="${{ env.ACR_NAME }}.azurecr.io"
-          IMAGE_URI="$LOGIN_SERVER/${{ env.REPO_NAME }}:${{ env.TAG }}"
+          IMAGE_URI="${{ env.ACR_LOGIN_SERVER }}/${{ env.REPO_NAME }}:${{ env.TAG }}"
           
           echo "Building $IMAGE_URI..."
           docker build -t $IMAGE_URI .
@@ -110,7 +108,7 @@ jobs:
           az containerapp update \
             --name ${{ env.APP_NAME }} \
             --resource-group ${{ env.RESOURCE_GROUP }} \
-            --image ${{ env.ACR_NAME }}.azurecr.io/${{ env.REPO_NAME }}:${{ env.TAG }}
+            --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.REPO_NAME }}:${{ env.TAG }}
 
       # ---------------------------------------------------------------------
       # 4. Cleanup Old Images
@@ -122,15 +120,15 @@ jobs:
           echo "Cleaning up old images for repository: ${{ env.REPO_NAME }}"
           
           # Get the digests of the tags we want to keep
-          KEEP_DIGEST_1=$(az acr repository show --name ${{ env.ACR_NAME }} --image ${{ env.REPO_NAME }}:${{ env.TAG }} --query digest -o tsv || echo "none")
-          KEEP_DIGEST_2=$(az acr repository show --name ${{ env.ACR_NAME }} --image ${{ env.REPO_NAME }}:${{ env.PREV_TAG }} --query digest -o tsv || echo "none")
+          KEEP_DIGEST_1=$(az acr repository show --name ${{ env.ACR_LOGIN_SERVER }} --image ${{ env.REPO_NAME }}:${{ env.TAG }} --query digest -o tsv || echo "none")
+          KEEP_DIGEST_2=$(az acr repository show --name ${{ env.ACR_LOGIN_SERVER }} --image ${{ env.REPO_NAME }}:${{ env.PREV_TAG }} --query digest -o tsv || echo "none")
           
           echo "Keeping digest for ${{ env.TAG }}: $KEEP_DIGEST_1"
           echo "Keeping digest for ${{ env.PREV_TAG }}: $KEEP_DIGEST_2"
           
           # List all manifests (digests) in the repository
           # Ordered by time is nice for logging, but we process all.
-          MANIFESTS=$(az acr repository show-manifests --name ${{ env.ACR_NAME }} --repository ${{ env.REPO_NAME }} --query "[].digest" -o tsv)
+          MANIFESTS=$(az acr repository show-manifests --name ${{ env.ACR_LOGIN_SERVER }} --repository ${{ env.REPO_NAME }} --query "[].digest" -o tsv)
           
           for DIGEST in $MANIFESTS; do
             if [ "$DIGEST" == "$KEEP_DIGEST_1" ] || [ "$DIGEST" == "$KEEP_DIGEST_2" ]; then
@@ -138,6 +136,6 @@ jobs:
             else
               echo "Deleting $DIGEST..."
               # --yes to bypass confirmation prompt
-              az acr repository delete --name ${{ env.ACR_NAME }} --image ${{ env.REPO_NAME }}@$DIGEST --yes
+              az acr repository delete --name ${{ env.ACR_LOGIN_SERVER }} --image ${{ env.REPO_NAME }}@$DIGEST --yes
             fi
           done
